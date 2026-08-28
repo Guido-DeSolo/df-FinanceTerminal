@@ -142,3 +142,33 @@ SELECT
 FROM deck_reservations
 JOIN decks ON decks.id = deck_reservations.deck_id
 JOIN library ON library.manabox_id = deck_reservations.library_item_id;
+
+-- Current personal wealth snapshot. Each independent enumeration tool updates
+-- only its own category and timestamp. Reserved assets remain fully owned and
+-- therefore remain part of these values.
+CREATE TABLE IF NOT EXISTS wealth (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    bonds                   REAL NOT NULL DEFAULT 0,
+    real_estate             REAL NOT NULL DEFAULT 0,
+    liquid                  REAL NOT NULL DEFAULT 0,
+    futures                 REAL NOT NULL DEFAULT 0,
+    stocks                  REAL NOT NULL DEFAULT 0,
+    bonds_updated_at        TEXT,
+    real_estate_updated_at  TEXT,
+    liquid_updated_at       TEXT,
+    futures_updated_at      TEXT,
+    stocks_updated_at       TEXT
+);
+
+INSERT OR IGNORE INTO wealth (id) VALUES (1);
+
+CREATE VIEW IF NOT EXISTS net_worth AS
+SELECT
+    bonds,
+    real_estate,
+    liquid,
+    futures,
+    stocks,
+    bonds + real_estate + liquid + futures + stocks AS total
+FROM wealth
+WHERE id = 1;
