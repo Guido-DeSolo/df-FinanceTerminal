@@ -88,3 +88,57 @@ SELECT
 FROM library_items AS li
 JOIN cards AS c ON c.id = li.card_id;
 
+-- A stored deck is the original text file plus the name derived from its
+-- filename. Its reservations disappear automatically when the deck is
+-- deleted; the owned quantities in library_items are never changed.
+CREATE TABLE IF NOT EXISTS decks (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    filename    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    added_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS deck_reservations (
+    deck_id          INTEGER NOT NULL,
+    library_item_id  INTEGER NOT NULL,
+    quantity         INTEGER NOT NULL CHECK (quantity > 0),
+
+    PRIMARY KEY (deck_id, library_item_id),
+
+    FOREIGN KEY (deck_id) REFERENCES decks (id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (library_item_id) REFERENCES library_items (manabox_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS deck_reservations_library_item_idx
+    ON deck_reservations (library_item_id);
+
+-- Reservations affect availability, not ownership or theoretical wealth.
+CREATE VIEW IF NOT EXISTS available_library AS
+SELECT
+    library.*,
+    COALESCE(reservations.quantity, 0) AS reserved_quantity,
+    library.quantity - COALESCE(reservations.quantity, 0) AS available_quantity
+FROM library
+LEFT JOIN (
+    SELECT library_item_id, SUM(quantity) AS quantity
+    FROM deck_reservations
+    GROUP BY library_item_id
+) AS reservations
+    ON reservations.library_item_id = library.manabox_id;
+
+CREATE VIEW IF NOT EXISTS deck_library AS
+SELECT
+    decks.id AS deck_id,
+    decks.name AS deck_name,
+    decks.filename,
+    library.*,
+    deck_reservations.quantity AS reserved_quantity
+FROM deck_reservations
+JOIN decks ON decks.id = deck_reservations.deck_id
+JOIN library ON library.manabox_id = deck_reservations.library_item_id;
