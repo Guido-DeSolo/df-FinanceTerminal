@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "schema.sql"
 EXPECTED_COLUMNS = (
     "Binder Name",
