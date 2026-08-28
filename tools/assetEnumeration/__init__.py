@@ -10,9 +10,10 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -31,6 +32,35 @@ class MtgEvaluationResult:
     priced_cards: int
     unpriced_rows: int
     unpriced_cards: int
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SilverPurchaseResult:
+    transaction_id: int
+    troy_ounces: Decimal
+    total_paid: Decimal
+    transacted_at: str
+
+
+@dataclass(frozen=True)
+class SilverSaleResult:
+    transaction_id: int
+    troy_ounces: Decimal
+    proceeds: Decimal
+    cost_basis: Decimal
+    realized_pl: Decimal
+    transacted_at: str
+
+
+@dataclass(frozen=True)
+class SilverEvaluationResult:
+    troy_ounces: Decimal
+    spot_price: Decimal
+    holding_value: Decimal
+    cost_basis: Decimal
+    unrealized_pl: Decimal
+    realized_pl: Decimal
     updated_at: str
 
 
@@ -173,6 +203,213 @@ class AssetEnumeration:
             updated_at=updated_at,
         )
 
+    @staticmethod
+    def _positive_decimal(value: Decimal | str | float, field: str) -> Decimal:
+        try:
+            result = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError(f"{field} must be a number") from exc
+        if not result.is_finite() or result <= 0:
+            raise ValueError(f"{field} must be greater than zero")
+        return result
+
+    @staticmethod
+    def _money_cents(value: Decimal | str | float, field: str) -> int:
+        try:
+            amount = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError(f"{field} must be a dollar amount") from exc
+        cents = amount * 100
+        if not amount.is_finite() or amount < 0 or cents != cents.to_integral_value():
+            raise ValueError(f"{field} must be a nonnegative whole-cent amount")
+        return int(cents)
+
+    @staticmethod
+    def _timestamp(value: str | None) -> str:
+        if value is None:
+            return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            )
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("timestamp must be ISO-8601") from exc
+        return value
+
+    def silverPurchase(
+        self,
+        troy_ounces: Decimal | str | float,
+        total_paid: Decimal | str | float,
+        transacted_at: str | None = None,
+    ) -> SilverPurchaseResult:
+        """Record one immutable silver purchase lot."""
+        ounces = self._positive_decimal(troy_ounces, "troy ounces")
+        total_cents = self._money_cents(total_paid, "total paid")
+        timestamp = self._timestamp(transacted_at)
+        with self.connect() as connection:
+            self.initialize(connection)
+            cursor = connection.execute(
+                """
+                INSERT INTO silver_transactions (
+                    transaction_type, troy_ounces, total_cents, transacted_at
+                ) VALUES ('purchase', ?, ?, ?)
+                """,
+                (float(ounces), total_cents, timestamp),
+            )
+            transaction_id = int(cursor.lastrowid)
+        return SilverPurchaseResult(
+            transaction_id, ounces, Decimal(total_cents) / 100, timestamp
+        )
+
+    def silverSale(
+        self,
+        troy_ounces: Decimal | str | float,
+        total_proceeds: Decimal | str | float,
+        transacted_at: str | None = None,
+    ) -> SilverSaleResult:
+        """Record a silver sale and consume purchase lots using FIFO."""
+        ounces = self._positive_decimal(troy_ounces, "troy ounces")
+        proceeds_cents = self._money_cents(total_proceeds, "total proceeds")
+        timestamp = self._timestamp(transacted_at)
+        with self.connect() as connection:
+            self.initialize(connection)
+            lots = connection.execute(
+                """
+                SELECT purchase_id, remaining_ounces, remaining_cost_basis_cents
+                FROM silver_lots
+                WHERE remaining_ounces > 0
+                ORDER BY transacted_at, purchase_id
+                """
+            ).fetchall()
+            available = sum(
+                (Decimal(str(row["remaining_ounces"])) for row in lots),
+                Decimal("0"),
+            )
+            if ounces > available:
+                raise ValueError(
+                    f"cannot sell {ounces} troy oz; only {available} available"
+                )
+
+            cursor = connection.execute(
+                """
+                INSERT INTO silver_transactions (
+                    transaction_type, troy_ounces, total_cents, transacted_at
+                ) VALUES ('sale', ?, ?, ?)
+                """,
+                (float(ounces), proceeds_cents, timestamp),
+            )
+            sale_id = int(cursor.lastrowid)
+            remaining = ounces
+            allocated_cost_cents = 0
+            for lot in lots:
+                lot_ounces = Decimal(str(lot["remaining_ounces"]))
+                if lot_ounces <= 0:
+                    continue
+                consumed = min(remaining, lot_ounces)
+                lot_cost_cents = int(lot["remaining_cost_basis_cents"])
+                if consumed == lot_ounces:
+                    cost_cents = lot_cost_cents
+                else:
+                    cost_cents = int(
+                        (Decimal(lot_cost_cents) * consumed / lot_ounces).quantize(
+                            Decimal("1"), rounding=ROUND_HALF_UP
+                        )
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO silver_sale_allocations (
+                        sale_id, purchase_id, troy_ounces, cost_basis_cents
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (sale_id, int(lot["purchase_id"]), float(consumed), cost_cents),
+                )
+                allocated_cost_cents += cost_cents
+                remaining -= consumed
+                if remaining == 0:
+                    break
+            connection.execute(
+                """
+                INSERT INTO cash_removed (
+                    source_asset, source_transaction_id, amount_cents, removed_at
+                ) VALUES ('silver', ?, ?, ?)
+                """,
+                (sale_id, proceeds_cents, timestamp),
+            )
+        return SilverSaleResult(
+            transaction_id=sale_id,
+            troy_ounces=ounces,
+            proceeds=Decimal(proceeds_cents) / 100,
+            cost_basis=Decimal(allocated_cost_cents) / 100,
+            realized_pl=Decimal(proceeds_cents - allocated_cost_cents) / 100,
+            transacted_at=timestamp,
+        )
+
+    @staticmethod
+    def _silver_spot_price(api_key: str) -> Decimal:
+        query = urlencode(
+            {"api_key": api_key, "base": "USD", "currencies": "XAG"}
+        )
+        request = Request(
+            f"https://api.metalpriceapi.com/v1/latest?{query}",
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.load(response)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"silver price request failed: {exc}") from exc
+        if result.get("success") is False:
+            raise RuntimeError(f"silver price provider rejected the request: {result}")
+        rates = result.get("rates") or {}
+        try:
+            if rates.get("USDXAG") not in (None, ""):
+                spot = Decimal(str(rates["USDXAG"]))
+            else:
+                ounces_per_dollar = Decimal(str(rates["XAG"]))
+                spot = Decimal("1") / ounces_per_dollar
+        except (InvalidOperation, KeyError, ZeroDivisionError) as exc:
+            raise RuntimeError("silver price provider returned an invalid rate") from exc
+        if not spot.is_finite() or spot <= 0:
+            raise RuntimeError("silver price provider returned an invalid rate")
+        return spot
+
+    def silverEvaluation(self, api_key: str | None = None) -> SilverEvaluationResult:
+        """Value remaining silver, calculate P/L, and update wealth.futures."""
+        key = api_key or os.environ.get("METALPRICE_API_KEY")
+        if not key:
+            raise ValueError("set METALPRICE_API_KEY before evaluating silver")
+        spot = self._silver_spot_price(key)
+        with self.connect() as connection:
+            self.initialize(connection)
+            position = connection.execute("SELECT * FROM silver_position").fetchone()
+        ounces = Decimal(str(position["troy_ounces"]))
+        cost_basis = Decimal(int(position["cost_basis_cents"])) / 100
+        realized_pl = Decimal(int(position["realized_pl_cents"])) / 100
+        holding_value = (ounces * spot).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        unrealized_pl = holding_value - cost_basis
+        updated_at = self._timestamp(None)
+        with self.connect() as connection:
+            self.initialize(connection)
+            connection.execute(
+                """
+                UPDATE wealth
+                SET futures = ?, futures_updated_at = ?
+                WHERE id = 1
+                """,
+                (float(holding_value), updated_at),
+            )
+        return SilverEvaluationResult(
+            troy_ounces=ounces,
+            spot_price=spot,
+            holding_value=holding_value,
+            cost_basis=cost_basis,
+            unrealized_pl=unrealized_pl,
+            realized_pl=realized_pl,
+            updated_at=updated_at,
+        )
+
 
 def default_database() -> Path:
     configured = os.environ.get("MTG_DB_FILE")
@@ -191,22 +428,64 @@ def main(argv: list[str] | None = None) -> int:
         description="Evaluate personal assets and update the wealth snapshot.",
     )
     parser.add_argument("--database", "-d", type=Path, default=default_database())
-    parser.add_argument("operation", choices=("mtgEvaluation",))
+    commands = parser.add_subparsers(dest="operation", required=True)
+    commands.add_parser("mtgEvaluation")
+    purchase = commands.add_parser("silverPurchase")
+    purchase.add_argument("troy_ounces")
+    purchase.add_argument("total_paid")
+    purchase.add_argument("--at", dest="transacted_at")
+    sale = commands.add_parser("silverSale")
+    sale.add_argument("troy_ounces")
+    sale.add_argument("total_proceeds")
+    sale.add_argument("--at", dest="transacted_at")
+    commands.add_parser("silverEvaluation")
     args = parser.parse_args(argv)
+    enumeration = AssetEnumeration(args.database)
     try:
-        result = AssetEnumeration(args.database).mtgEvaluation()
+        if args.operation == "mtgEvaluation":
+            result = enumeration.mtgEvaluation()
+            print(f"Bonds value: ${result.value:,.2f}")
+            print(
+                f"Priced: {result.priced_rows} library rows / "
+                f"{result.priced_cards} cards"
+            )
+            print(
+                f"Unpriced: {result.unpriced_rows} library rows / "
+                f"{result.unpriced_cards} cards"
+            )
+            print("Updated wealth.bonds")
+        elif args.operation == "silverPurchase":
+            result = enumeration.silverPurchase(
+                args.troy_ounces, args.total_paid, args.transacted_at
+            )
+            print(
+                f"Recorded purchase #{result.transaction_id}: "
+                f"{result.troy_ounces} troy oz for ${result.total_paid:,.2f}"
+            )
+        elif args.operation == "silverSale":
+            result = enumeration.silverSale(
+                args.troy_ounces, args.total_proceeds, args.transacted_at
+            )
+            print(
+                f"Recorded sale #{result.transaction_id}: "
+                f"{result.troy_ounces} troy oz for ${result.proceeds:,.2f}"
+            )
+            print(
+                f"Cost basis: ${result.cost_basis:,.2f}; "
+                f"realized P/L: ${result.realized_pl:+,.2f}"
+            )
+            print(f"Recorded ${result.proceeds:,.2f} as cash removed")
+        else:
+            result = enumeration.silverEvaluation()
+            print(f"Silver held: {result.troy_ounces} troy oz")
+            print(f"Spot price: ${result.spot_price:,.2f} per troy oz")
+            print(f"Futures value: ${result.holding_value:,.2f}")
+            print(f"Remaining cost basis: ${result.cost_basis:,.2f}")
+            print(f"Unrealized P/L: ${result.unrealized_pl:+,.2f}")
+            print(f"Realized P/L: ${result.realized_pl:+,.2f}")
+            print("Updated wealth.futures")
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         parser.exit(1, f"assetEnumeration: {exc}\n")
-    print(f"Bonds value: ${result.value:,.2f}")
-    print(
-        f"Priced: {result.priced_rows} library rows / "
-        f"{result.priced_cards} cards"
-    )
-    print(
-        f"Unpriced: {result.unpriced_rows} library rows / "
-        f"{result.unpriced_cards} cards"
-    )
-    print("Updated wealth.bonds")
     return 0
 
 
