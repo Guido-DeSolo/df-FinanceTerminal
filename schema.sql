@@ -172,3 +172,84 @@ SELECT
     bonds + real_estate + liquid + futures + stocks AS total
 FROM wealth
 WHERE id = 1;
+
+-- Immutable silver transaction ledger. Amounts paid and received are stored
+-- as integer USD cents; metal quantities are troy ounces.
+CREATE TABLE IF NOT EXISTS silver_transactions (
+    id              INTEGER PRIMARY KEY,
+    transaction_type TEXT NOT NULL CHECK (
+        transaction_type IN ('purchase', 'sale')
+    ),
+    troy_ounces     REAL NOT NULL CHECK (troy_ounces > 0),
+    total_cents     INTEGER NOT NULL CHECK (total_cents >= 0),
+    transacted_at   TEXT NOT NULL,
+    recorded_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS silver_transactions_type_date_idx
+    ON silver_transactions (transaction_type, transacted_at);
+
+-- A sale consumes purchase lots oldest-first. These rows preserve the exact
+-- cost basis assigned to every partial or complete FIFO lot consumption.
+CREATE TABLE IF NOT EXISTS silver_sale_allocations (
+    sale_id           INTEGER NOT NULL,
+    purchase_id       INTEGER NOT NULL,
+    troy_ounces       REAL NOT NULL CHECK (troy_ounces > 0),
+    cost_basis_cents  INTEGER NOT NULL CHECK (cost_basis_cents >= 0),
+
+    PRIMARY KEY (sale_id, purchase_id),
+
+    FOREIGN KEY (sale_id) REFERENCES silver_transactions (id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    FOREIGN KEY (purchase_id) REFERENCES silver_transactions (id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS silver_sale_allocations_purchase_idx
+    ON silver_sale_allocations (purchase_id);
+
+-- USD proceeds leave tracked wealth, but remain recorded for reporting.
+CREATE TABLE IF NOT EXISTS cash_removed (
+    id                     INTEGER PRIMARY KEY,
+    source_asset           TEXT NOT NULL,
+    source_transaction_id  INTEGER NOT NULL,
+    amount_cents           INTEGER NOT NULL CHECK (amount_cents >= 0),
+    removed_at             TEXT NOT NULL,
+
+    UNIQUE (source_asset, source_transaction_id)
+);
+
+CREATE VIEW IF NOT EXISTS silver_lots AS
+SELECT
+    purchases.id AS purchase_id,
+    purchases.transacted_at,
+    purchases.troy_ounces AS purchased_ounces,
+    purchases.total_cents AS purchase_cost_cents,
+    purchases.troy_ounces - COALESCE(SUM(allocations.troy_ounces), 0)
+        AS remaining_ounces,
+    purchases.total_cents - COALESCE(SUM(allocations.cost_basis_cents), 0)
+        AS remaining_cost_basis_cents
+FROM silver_transactions AS purchases
+LEFT JOIN silver_sale_allocations AS allocations
+    ON allocations.purchase_id = purchases.id
+WHERE purchases.transaction_type = 'purchase'
+GROUP BY purchases.id;
+
+CREATE VIEW IF NOT EXISTS silver_position AS
+SELECT
+    COALESCE(SUM(remaining_ounces), 0) AS troy_ounces,
+    COALESCE(SUM(remaining_cost_basis_cents), 0) AS cost_basis_cents,
+    COALESCE((
+        SELECT SUM(sales.total_cents - allocations.cost_basis_cents)
+        FROM silver_transactions AS sales
+        JOIN (
+            SELECT sale_id, SUM(cost_basis_cents) AS cost_basis_cents
+            FROM silver_sale_allocations
+            GROUP BY sale_id
+        ) AS allocations ON allocations.sale_id = sales.id
+        WHERE sales.transaction_type = 'sale'
+    ), 0) AS realized_pl_cents
+FROM silver_lots;
