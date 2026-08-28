@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Import a ManaBox collection CSV into the personal MTG SQLite database."""
+"""Manage a ManaBox collection and reserve its cards for deck files."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import os
+import re
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -44,8 +46,30 @@ class ImportResult:
     name_matches: int
 
 
+@dataclass(frozen=True)
+class DeckResult:
+    name: str
+    cards: int
+    library_rows: int
+
+
+class DeckShortageError(ValueError):
+    """Raised when a deck requests more cards than are currently available."""
+
+    def __init__(self, shortages: list[str]):
+        self.shortages = shortages
+        super().__init__("cards unavailable:\n  " + "\n  ".join(shortages))
+
+
 class MtgLibrary:
-    """A single-purpose ManaBox-to-SQLite library importer."""
+    """Import owned cards and reserve them for immutable deck files."""
+
+    DECK_LINE = re.compile(
+        r"^(?P<quantity>[1-9][0-9]*)\s+"
+        r"(?P<name>.+)\s+"
+        r"\((?P<set_code>[^()]+)\)\s+"
+        r"(?P<collector_number>\S+)\s*$"
+    )
 
     def __init__(self, database: Path | str):
         self.database = Path(database).expanduser()
@@ -192,6 +216,125 @@ class MtgLibrary:
                 name_matches += int(not exact)
         return ImportResult(imported, exact_matches, name_matches)
 
+    @classmethod
+    def deck_entries(
+        cls, content: str
+    ) -> Counter[tuple[str, str, str]]:
+        """Parse all deck lines; section comments have no inventory meaning."""
+        entries: Counter[tuple[str, str, str]] = Counter()
+        for line_number, original in enumerate(content.splitlines(), start=1):
+            line = original.strip()
+            if not line or line.startswith("//"):
+                continue
+            match = cls.DECK_LINE.fullmatch(line)
+            if not match:
+                raise ValueError(f"deck line {line_number}: unrecognized entry {line!r}")
+            entries[
+                (
+                    match["name"],
+                    match["set_code"].upper(),
+                    match["collector_number"],
+                )
+            ] += int(match["quantity"])
+        if not entries:
+            raise ValueError("deck contains no card entries")
+        return entries
+
+    @staticmethod
+    def _available_printings(
+        connection: sqlite3.Connection, set_code: str, collector_number: str
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            """
+            SELECT manabox_id, quantity, reserved_quantity, available_quantity
+            FROM available_library
+            WHERE set_code = ? COLLATE NOCASE
+              AND collector_number = ? COLLATE NOCASE
+            ORDER BY (foil = 'normal') DESC, manabox_id
+            """,
+            (set_code, collector_number),
+        ).fetchall()
+
+    def reserve_deck(self, deck_file: Path | str) -> DeckResult:
+        """Atomically store a deck file and reserve every card it enumerates."""
+        path = Path(deck_file).expanduser()
+        content = path.read_text(encoding="utf-8-sig")
+        entries = self.deck_entries(content)
+        name = path.stem
+        if not name:
+            raise ValueError("deck filename must have a name")
+
+        allocations: list[tuple[int, int]] = []
+        shortages: list[str] = []
+        with self.connect() as connection:
+            self.initialize(connection)
+            if connection.execute(
+                "SELECT 1 FROM decks WHERE name = ?", (name,)
+            ).fetchone():
+                raise ValueError(f"deck already exists: {name}")
+
+            for (card_name, set_code, collector_number), requested in entries.items():
+                candidates = self._available_printings(
+                    connection, set_code, collector_number
+                )
+                available = sum(int(row["available_quantity"]) for row in candidates)
+                if available < requested:
+                    shortages.append(
+                        f"{card_name} ({set_code}) {collector_number}: "
+                        f"needs {requested}, available {available}"
+                    )
+                    continue
+                remaining = requested
+                for row in candidates:
+                    reserved = min(remaining, int(row["available_quantity"]))
+                    if reserved:
+                        allocations.append((int(row["manabox_id"]), reserved))
+                        remaining -= reserved
+                    if remaining == 0:
+                        break
+
+            if shortages:
+                raise DeckShortageError(shortages)
+
+            cursor = connection.execute(
+                "INSERT INTO decks (name, filename, content) VALUES (?, ?, ?)",
+                (name, path.name, content),
+            )
+            deck_id = int(cursor.lastrowid)
+            connection.executemany(
+                """
+                INSERT INTO deck_reservations (deck_id, library_item_id, quantity)
+                VALUES (?, ?, ?)
+                """,
+                ((deck_id, library_item_id, quantity)
+                 for library_item_id, quantity in allocations),
+            )
+        return DeckResult(name, sum(entries.values()), len(allocations))
+
+    def remove_deck(self, name: str) -> int:
+        """Delete one stored deck; cascading reservations become available."""
+        with self.connect() as connection:
+            self.initialize(connection)
+            cursor = connection.execute("DELETE FROM decks WHERE name = ?", (name,))
+            if cursor.rowcount == 0:
+                raise ValueError(f"deck not found: {name}")
+            return cursor.rowcount
+
+    def decks(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            self.initialize(connection)
+            return connection.execute(
+                """
+                SELECT decks.name, decks.filename, decks.added_at,
+                       COALESCE(SUM(deck_reservations.quantity), 0) AS cards
+                FROM decks
+                LEFT JOIN deck_reservations
+                    ON deck_reservations.deck_id = decks.id
+                GROUP BY decks.id
+                ORDER BY decks.name
+                """
+            ).fetchall()
+
 
 def default_database() -> Path:
     configured = os.environ.get("MTG_DB_FILE")
@@ -207,20 +350,41 @@ def default_database() -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mtgLibrary",
-        description="Import a complete ManaBox collection CSV into SQLite.",
+        description="Import a ManaBox library and reserve cards for decks.",
     )
-    parser.add_argument("csv", type=Path, help="ManaBox collection export")
     parser.add_argument("--database", "-d", type=Path, default=default_database())
+    commands = parser.add_subparsers(dest="command", required=True)
+    library_parser = commands.add_parser("import-library")
+    library_parser.add_argument("csv", type=Path, help="ManaBox collection export")
+    deck_parser = commands.add_parser("reserve-deck")
+    deck_parser.add_argument("deck", type=Path, help="ManaBox deck text export")
+    remove_parser = commands.add_parser("remove-deck")
+    remove_parser.add_argument("name", help="deck name (filename without .txt)")
+    commands.add_parser("decks")
     args = parser.parse_args(argv)
+    library = MtgLibrary(args.database)
     try:
-        result = MtgLibrary(args.database).import_csv(args.csv)
+        if args.command == "import-library":
+            result = library.import_csv(args.csv)
+            print(f"Imported {result.rows} library rows into {args.database}")
+            print(
+                f"Matched {result.exact_matches} exact Scryfall IDs; "
+                f"{result.name_matches} by card name"
+            )
+        elif args.command == "reserve-deck":
+            result = library.reserve_deck(args.deck)
+            print(
+                f"Reserved {result.cards} cards for {result.name} "
+                f"across {result.library_rows} library rows"
+            )
+        elif args.command == "remove-deck":
+            library.remove_deck(args.name)
+            print(f"Removed {args.name}; its cards are available again")
+        else:
+            for deck in library.decks():
+                print(f"{deck['name']}\t{deck['cards']}\t{deck['filename']}")
     except (OSError, sqlite3.Error, ValueError) as exc:
         parser.exit(1, f"mtgLibrary: {exc}\n")
-    print(f"Imported {result.rows} library rows into {args.database}")
-    print(
-        f"Matched {result.exact_matches} exact Scryfall IDs; "
-        f"{result.name_matches} by card name"
-    )
     return 0
 
 
