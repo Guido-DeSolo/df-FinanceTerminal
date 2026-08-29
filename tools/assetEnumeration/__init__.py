@@ -64,6 +64,16 @@ class SilverEvaluationResult:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class BitcoinEvaluationResult:
+    quantity: Decimal
+    current_price: Decimal
+    market_value: Decimal
+    cost_basis: Decimal
+    unrealized_pl: Decimal
+    updated_at: str
+
+
 class AssetEnumeration:
     """Evaluate one asset category at a time."""
 
@@ -200,6 +210,109 @@ class AssetEnumeration:
             priced_cards=priced_cards,
             unpriced_rows=unpriced_rows,
             unpriced_cards=unpriced_cards,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _alpaca_positions(key_id: str, secret_key: str, live: bool) -> list[dict]:
+        base_url = (
+            "https://api.alpaca.markets"
+            if live
+            else "https://paper-api.alpaca.markets"
+        )
+        request = Request(
+            f"{base_url}/v2/positions",
+            headers={
+                "APCA-API-KEY-ID": key_id,
+                "APCA-API-SECRET-KEY": secret_key,
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.load(response)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            raise RuntimeError(
+                f"Alpaca returned HTTP {exc.code}: {detail}"
+            ) from exc
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Alpaca positions request failed: {exc}") from exc
+        if not isinstance(result, list):
+            raise RuntimeError("Alpaca returned an invalid positions response")
+        return [position for position in result if isinstance(position, dict)]
+
+    @staticmethod
+    def _alpaca_decimal(position: dict, field: str) -> Decimal:
+        try:
+            value = Decimal(str(position[field]))
+        except (KeyError, InvalidOperation) as exc:
+            raise RuntimeError(
+                f"Alpaca BTC position has an invalid {field}"
+            ) from exc
+        if not value.is_finite():
+            raise RuntimeError(f"Alpaca BTC position has an invalid {field}")
+        return value
+
+    def bitcoinEvaluation(
+        self,
+        key_id: str | None = None,
+        secret_key: str | None = None,
+        live: bool | None = None,
+    ) -> BitcoinEvaluationResult:
+        """Value the Alpaca BTC position and update ``wealth.liquid``."""
+        alpaca_key = key_id or os.environ.get("APCA_API_KEY_ID")
+        alpaca_secret = secret_key or os.environ.get("APCA_API_SECRET_KEY")
+        if not alpaca_key or not alpaca_secret:
+            raise ValueError(
+                "set APCA_API_KEY_ID and APCA_API_SECRET_KEY before evaluating bitcoin"
+            )
+        use_live = (
+            os.environ.get("ALPACA_LIVE", "").casefold() in {"1", "true", "yes"}
+            if live is None
+            else live
+        )
+        position = next(
+            (
+                item
+                for item in self._alpaca_positions(
+                    alpaca_key, alpaca_secret, use_live
+                )
+                if str(item.get("symbol", "")).replace("/", "").upper()
+                == "BTCUSD"
+            ),
+            None,
+        )
+        if position is None:
+            quantity = Decimal("0")
+            current_price = Decimal("0")
+            market_value = Decimal("0")
+            cost_basis = Decimal("0")
+            unrealized_pl = Decimal("0")
+        else:
+            quantity = self._alpaca_decimal(position, "qty")
+            current_price = self._alpaca_decimal(position, "current_price")
+            market_value = self._alpaca_decimal(position, "market_value")
+            cost_basis = self._alpaca_decimal(position, "cost_basis")
+            unrealized_pl = self._alpaca_decimal(position, "unrealized_pl")
+        updated_at = self._timestamp(None)
+        with self.connect() as connection:
+            self.initialize(connection)
+            connection.execute(
+                """
+                UPDATE wealth
+                SET liquid = ?, liquid_updated_at = ?
+                WHERE id = 1
+                """,
+                (float(market_value), updated_at),
+            )
+        return BitcoinEvaluationResult(
+            quantity=quantity,
+            current_price=current_price,
+            market_value=market_value,
+            cost_basis=cost_basis,
+            unrealized_pl=unrealized_pl,
             updated_at=updated_at,
         )
 
@@ -430,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database", "-d", type=Path, default=default_database())
     commands = parser.add_subparsers(dest="operation", required=True)
     commands.add_parser("mtgEvaluation")
+    commands.add_parser("bitcoinEvaluation")
     purchase = commands.add_parser("silverPurchase")
     purchase.add_argument("troy_ounces")
     purchase.add_argument("total_paid")
@@ -454,6 +568,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"{result.unpriced_cards} cards"
             )
             print("Updated wealth.bonds")
+        elif args.operation == "bitcoinEvaluation":
+            result = enumeration.bitcoinEvaluation()
+            print(f"Bitcoin held: {result.quantity} BTC")
+            print(f"Current price: ${result.current_price:,.2f} per BTC")
+            print(f"Liquid value: ${result.market_value:,.2f}")
+            print(f"Cost basis: ${result.cost_basis:,.2f}")
+            print(f"Unrealized P/L: ${result.unrealized_pl:+,.2f}")
+            print("Updated wealth.liquid")
         elif args.operation == "silverPurchase":
             result = enumeration.silverPurchase(
                 args.troy_ounces, args.total_paid, args.transacted_at
