@@ -1,0 +1,17 @@
+[Unit]
+Description=Stream Alpaca live stock trades for %I
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
+EnvironmentFile=%h/.config/df-financeterminal/alpaca-live-trades.env
+ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/liveOrderBooks/__init__.py %I
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
