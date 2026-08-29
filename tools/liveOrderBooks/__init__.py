@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import math
@@ -346,81 +345,3 @@ class AlpacaLiveTrades:
                     )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="liveOrderBooks",
-        description="Store subscribed Alpaca real-time stock trades in SQLite.",
-    )
-    parser.add_argument(
-        "symbols",
-        nargs="*",
-        help="stock symbols; commas are accepted (or set ALPACA_LIVE_SYMBOLS)",
-    )
-    parser.add_argument(
-        "--feed",
-        choices=tuple(STREAM_URLS),
-        default=os.environ.get("ALPACA_DATA_FEED", "iex"),
-    )
-    parser.add_argument(
-        "--class",
-        dest="asset_class",
-        choices=("auto", "stock", "crypto"),
-        default=os.environ.get("ALPACA_ASSET_CLASS", "auto"),
-    )
-    parser.add_argument(
-        "--location",
-        choices=tuple(CRYPTO_STREAM_URLS),
-        default=os.environ.get("ALPACA_CRYPTO_LOCATION", "us"),
-    )
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    parser.add_argument(
-        "--prune-older-than",
-        metavar="DURATION",
-        help="delete stored live trades older than a duration and exit",
-    )
-    args = parser.parse_args(argv)
-    if args.prune_older_than:
-        try:
-            deleted = prune_live_trades(args.database, args.prune_older_than)
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            parser.exit(1, f"liveOrderBooks: {exc}\n")
-        print(f"Deleted live trades: {deleted}")
-        print(f"Retention: {args.prune_older_than}")
-        print(f"Database: {args.database}")
-        return 0
-    symbol_values = args.symbols or [
-        os.environ.get("ALPACA_LIVE_SYMBOLS", "BTC/USD")
-    ]
-    try:
-        symbols = normalize_symbols(symbol_values)
-        contains_pairs = ["/" in symbol for symbol in symbols]
-        if any(contains_pairs) and not all(contains_pairs):
-            raise ValueError(
-                "stock symbols and cryptocurrency pairs require separate services"
-            )
-        asset_class = (
-            "crypto" if all(contains_pairs) else "stock"
-        ) if args.asset_class == "auto" else args.asset_class
-        if asset_class == "crypto" and not all(contains_pairs):
-            raise ValueError("crypto symbols must use pair notation such as BTC/USD")
-        if asset_class == "stock" and any(contains_pairs):
-            raise ValueError("stock symbols cannot contain '/'")
-        stream = AlpacaLiveTrades.from_environment(
-            args.database,
-            symbols,
-            args.feed,
-            asset_class,
-            args.location,
-        )
-        asyncio.run(stream.run())
-    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"liveOrderBooks: {exc}\n")
-    except KeyboardInterrupt:
-        return 0
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
