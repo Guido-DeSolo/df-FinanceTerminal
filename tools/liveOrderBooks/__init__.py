@@ -8,9 +8,10 @@ import asyncio
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -59,6 +60,35 @@ def default_database() -> Path:
         return server_database
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     return data_home / "df-financeterminal" / "mtg.db"
+
+
+def duration_seconds(value: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)(s|min|h|d|w)", value)
+    if not match:
+        raise ValueError("duration must look like 30min, 6h, 1d, or 1w")
+    multiplier = {
+        "s": 1,
+        "min": 60,
+        "h": 60 * 60,
+        "d": 24 * 60 * 60,
+        "w": 7 * 24 * 60 * 60,
+    }[match.group(2)]
+    return int(match.group(1)) * multiplier
+
+
+def prune_live_trades(database: Path | str, max_age: str = "1d") -> int:
+    """Delete stored live trades older than a compact retention duration."""
+    cutoff = datetime.now(UTC) - timedelta(seconds=duration_seconds(max_age))
+    cutoff_text = cutoff.isoformat().replace("+00:00", "Z")
+    path = Path(database).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(SCHEMA.read_text(encoding="utf-8"))
+        cursor = connection.execute(
+            "DELETE FROM live_trades WHERE datetime(timestamp) < datetime(?)",
+            (cutoff_text,),
+        )
+        return cursor.rowcount
 
 
 def _websocket_client():
@@ -345,7 +375,21 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("ALPACA_CRYPTO_LOCATION", "us"),
     )
     parser.add_argument("--database", "-d", type=Path, default=default_database())
+    parser.add_argument(
+        "--prune-older-than",
+        metavar="DURATION",
+        help="delete stored live trades older than a duration and exit",
+    )
     args = parser.parse_args(argv)
+    if args.prune_older_than:
+        try:
+            deleted = prune_live_trades(args.database, args.prune_older_than)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            parser.exit(1, f"liveOrderBooks: {exc}\n")
+        print(f"Deleted live trades: {deleted}")
+        print(f"Retention: {args.prune_older_than}")
+        print(f"Database: {args.database}")
+        return 0
     symbol_values = args.symbols or [
         os.environ.get("ALPACA_LIVE_SYMBOLS", "BTC/USD")
     ]
