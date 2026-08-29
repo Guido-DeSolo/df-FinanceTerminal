@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import os
 import re
@@ -345,48 +344,3 @@ def default_database() -> Path:
         return server_database
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     return data_home / "df-fintechterm" / "mtg.db"
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="mtgLibrary",
-        description="Import a ManaBox library and reserve cards for decks.",
-    )
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    commands = parser.add_subparsers(dest="command", required=True)
-    library_parser = commands.add_parser("import-library")
-    library_parser.add_argument("csv", type=Path, help="ManaBox collection export")
-    deck_parser = commands.add_parser("reserve-deck")
-    deck_parser.add_argument("deck", type=Path, help="ManaBox deck text export")
-    remove_parser = commands.add_parser("remove-deck")
-    remove_parser.add_argument("name", help="deck name (filename without .txt)")
-    commands.add_parser("decks")
-    args = parser.parse_args(argv)
-    library = MtgLibrary(args.database)
-    try:
-        if args.command == "import-library":
-            result = library.import_csv(args.csv)
-            print(f"Imported {result.rows} library rows into {args.database}")
-            print(
-                f"Matched {result.exact_matches} exact Scryfall IDs; "
-                f"{result.name_matches} by card name"
-            )
-        elif args.command == "reserve-deck":
-            result = library.reserve_deck(args.deck)
-            print(
-                f"Reserved {result.cards} cards for {result.name} "
-                f"across {result.library_rows} library rows"
-            )
-        elif args.command == "remove-deck":
-            library.remove_deck(args.name)
-            print(f"Removed {args.name}; its cards are available again")
-        else:
-            for deck in library.decks():
-                print(f"{deck['name']}\t{deck['cards']}\t{deck['filename']}")
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        parser.exit(1, f"mtgLibrary: {exc}\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
