@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
@@ -407,46 +406,3 @@ def _latest_calculated(series: tuple) -> object:
         if any(value is not None for value in values):
             return point
     return series[-1]
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="technicalIndicators",
-        description="Calculate technical indicators from stored historic bars.",
-    )
-    parser.add_argument("symbol")
-    parser.add_argument(
-        "--indicator", choices=(*INDICATORS, "all"), default="all"
-    )
-    parser.add_argument(
-        "--class", dest="asset_class", choices=("stock", "crypto"), default="stock"
-    )
-    parser.add_argument("--timeframe", default="1Day")
-    parser.add_argument("--feed", default="iex")
-    parser.add_argument("--location", default="us")
-    parser.add_argument("--adjustment", default="raw")
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    args = parser.parse_args(argv)
-    query = SeriesQuery(
-        database=args.database,
-        symbol=args.symbol,
-        asset_class=args.asset_class,
-        timeframe=args.timeframe,
-        feed=args.feed,
-        location=args.location,
-        adjustment=args.adjustment,
-    )
-    selected = INDICATORS if args.indicator == "all" else {
-        args.indicator: INDICATORS[args.indicator]
-    }
-    try:
-        for name, function in selected.items():
-            latest = _latest_calculated(function(query))
-            print(f"{name}: {json.dumps(asdict(latest), sort_keys=True)}")
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        parser.exit(1, f"technicalIndicators: {exc}\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
