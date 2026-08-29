@@ -218,6 +218,57 @@ CREATE TABLE IF NOT EXISTS news_article_symbols (
 CREATE INDEX IF NOT EXISTS news_article_symbols_symbol_idx
     ON news_article_symbols (symbol, article_id);
 
+-- Idempotent Alpaca stock and cryptocurrency bar history. The source fields
+-- distinguish otherwise identical series retrieved from different feeds.
+CREATE TABLE IF NOT EXISTS historic_bars (
+    asset_class  TEXT NOT NULL CHECK (asset_class IN ('stock', 'crypto')),
+    symbol       TEXT NOT NULL,
+    timeframe    TEXT NOT NULL,
+    timestamp    TEXT NOT NULL,
+    open         REAL NOT NULL,
+    high         REAL NOT NULL,
+    low          REAL NOT NULL,
+    close        REAL NOT NULL,
+    volume       REAL NOT NULL,
+    trade_count  INTEGER,
+    vwap         REAL,
+    feed         TEXT NOT NULL DEFAULT '',
+    location     TEXT NOT NULL DEFAULT '',
+    adjustment   TEXT NOT NULL DEFAULT '',
+    fetched_at   TEXT NOT NULL,
+    raw_json     TEXT NOT NULL,
+
+    PRIMARY KEY (
+        asset_class, symbol, timeframe, timestamp,
+        feed, location, adjustment
+    )
+);
+
+CREATE INDEX IF NOT EXISTS historic_bars_series_idx
+    ON historic_bars (
+        asset_class, symbol, timeframe, feed, location, adjustment, timestamp
+    );
+
+CREATE TABLE IF NOT EXISTS historic_fetch_runs (
+    id               INTEGER PRIMARY KEY,
+    asset_class      TEXT NOT NULL,
+    symbols          TEXT NOT NULL,
+    timeframe        TEXT NOT NULL,
+    requested_start  TEXT NOT NULL,
+    requested_end    TEXT,
+    feed             TEXT NOT NULL DEFAULT '',
+    location         TEXT NOT NULL DEFAULT '',
+    adjustment       TEXT NOT NULL DEFAULT '',
+    pages            INTEGER NOT NULL DEFAULT 0,
+    rows_saved       INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL CHECK (
+        status IN ('running', 'complete', 'partial', 'failed')
+    ),
+    started_at       TEXT NOT NULL,
+    finished_at      TEXT,
+    error            TEXT
+);
+
 -- Immutable silver transaction ledger. Amounts paid and received are stored
 -- as integer USD cents; metal quantities are troy ounces.
 CREATE TABLE IF NOT EXISTS silver_transactions (
