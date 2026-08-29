@@ -11,7 +11,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -22,6 +22,12 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "schema.sql"
 HOMEPAGE = "http://openinsider.com/"
+SCREENER_URL = (
+    "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=3&fdr=&td=3"
+    "&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1"
+    "&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h="
+    "&oc2l=&oc2h=&sortcol=1&cnt=100&page=1"
+)
 TARGET_SECTION = "Latest Insider Buys"
 USER_AGENT = "df-FinanceTerminal openInsider/1.0 (personal research)"
 
@@ -63,8 +69,9 @@ def _integer(value: str) -> int | None:
 class _LatestBuysParser(HTMLParser):
     """Read only the tinytable immediately following the target heading."""
 
-    def __init__(self) -> None:
+    def __init__(self, target_section: str | None = TARGET_SECTION) -> None:
         super().__init__(convert_charrefs=True)
+        self.target_section = target_section
         self.heading = ""
         self._heading_tag = ""
         self._heading_text: list[str] = []
@@ -89,7 +96,13 @@ class _LatestBuysParser(HTMLParser):
             self._heading_text = []
         elif tag == "table":
             classes = attributes.get("class", "").split()
-            if self.heading == TARGET_SECTION and "tinytable" in classes:
+            if (
+                "tinytable" in classes
+                and (
+                    self.target_section is None
+                    or self.heading == self.target_section
+                )
+            ):
                 self._in_target_table = True
         elif self._in_target_table and tag == "tbody":
             self._in_body = True
@@ -180,6 +193,15 @@ def parse_homepage(document: str) -> list[dict]:
     return trades
 
 
+def parse_screener(document: str) -> list[dict]:
+    parser = _LatestBuysParser(target_section=None)
+    parser.feed(document)
+    trades = [trade for row in parser.rows if (trade := _trade(row)) is not None]
+    if not trades:
+        raise ValueError("OpenInsider screener contained no trade rows")
+    return trades
+
+
 class OpenInsider:
     """Fetch and store the homepage's latest individual purchase filings."""
 
@@ -197,8 +219,8 @@ class OpenInsider:
         connection.executescript(SCHEMA.read_text(encoding="utf-8"))
 
     @staticmethod
-    def fetch_homepage() -> str:
-        request = Request(HOMEPAGE, headers={"User-Agent": USER_AGENT})
+    def fetch_document(url: str) -> str:
+        request = Request(url, headers={"User-Agent": USER_AGENT})
         last_error: Exception | None = None
         for attempt in range(4):
             try:
@@ -220,7 +242,15 @@ class OpenInsider:
         raise RuntimeError(f"OpenInsider request failed after retries: {last_error}")
 
     def scrape(self) -> InsiderScrapeResult:
-        trades = parse_homepage(self.fetch_homepage())
+        trades = parse_homepage(self.fetch_document(HOMEPAGE))
+        return self._store(trades)
+
+    def scrape_screener(self) -> InsiderScrapeResult:
+        """Run the fixed three-day, purchases-and-sales screener once."""
+        trades = parse_screener(self.fetch_document(SCREENER_URL))
+        return self._store(trades)
+
+    def _store(self, trades: list[dict]) -> InsiderScrapeResult:
         scraped_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace(
             "+00:00", "Z"
         )
@@ -296,6 +326,21 @@ class OpenInsider:
             scraped_at=scraped_at,
         )
 
+    def prune(self, max_age_days: int = 7) -> int:
+        """Delete filings older than the configured rolling retention window."""
+        if max_age_days < 1:
+            raise ValueError("max_age_days must be positive")
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=max_age_days)
+        ).isoformat().replace("+00:00", "Z")
+        with self.connect() as connection:
+            self.initialize(connection)
+            cursor = connection.execute(
+                "DELETE FROM insiders WHERE datetime(filing_date) < datetime(?)",
+                (cutoff,),
+            )
+            return cursor.rowcount
+
 
 def default_database() -> Path:
     configured = os.environ.get("FINANCE_DB_FILE") or os.environ.get("MTG_DB_FILE")
@@ -313,10 +358,23 @@ def main(argv: list[str] | None = None) -> int:
         prog="openInsider",
         description="Store OpenInsider's Latest Insider Buys in SQLite.",
     )
+    parser.add_argument(
+        "operation",
+        nargs="?",
+        choices=("homepage", "screener", "prune"),
+        default="homepage",
+        help="scrape the homepage, run the fixed screener, or prune old filings",
+    )
     parser.add_argument("--database", "-d", type=Path, default=default_database())
     args = parser.parse_args(argv)
     try:
-        result = OpenInsider(args.database).scrape()
+        scraper = OpenInsider(args.database)
+        if args.operation == "prune":
+            deleted = scraper.prune()
+            print(f"Deleted: {deleted}")
+            print(f"Database: {args.database}")
+            return 0
+        result = scraper.scrape_screener() if args.operation == "screener" else scraper.scrape()
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         parser.exit(1, f"openInsider: {exc}\n")
     print(f"Fetched: {result.fetched}")
