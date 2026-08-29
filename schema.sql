@@ -256,7 +256,7 @@ CREATE TABLE IF NOT EXISTS live_trades (
     trade_id     TEXT NOT NULL,
     timestamp    TEXT NOT NULL,
     price        REAL NOT NULL,
-    size         INTEGER NOT NULL CHECK (size >= 0),
+    size         REAL NOT NULL CHECK (size >= 0),
     exchange     TEXT,
     conditions   TEXT NOT NULL,
     tape          TEXT,
