@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -351,38 +350,3 @@ def default_database() -> Path:
         return server_database
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     return data_home / "df-financeterminal" / "mtg.db"
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="openInsider",
-        description="Store OpenInsider's Latest Insider Buys in SQLite.",
-    )
-    parser.add_argument(
-        "operation",
-        nargs="?",
-        choices=("homepage", "screener", "prune"),
-        default="homepage",
-        help="scrape the homepage, run the fixed screener, or prune old filings",
-    )
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    args = parser.parse_args(argv)
-    try:
-        scraper = OpenInsider(args.database)
-        if args.operation == "prune":
-            deleted = scraper.prune()
-            print(f"Deleted: {deleted}")
-            print(f"Database: {args.database}")
-            return 0
-        result = scraper.scrape_screener() if args.operation == "screener" else scraper.scrape()
-    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"openInsider: {exc}\n")
-    print(f"Fetched: {result.fetched}")
-    print(f"Inserted: {result.inserted}")
-    print(f"Updated: {result.updated}")
-    print(f"Database: {args.database}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
