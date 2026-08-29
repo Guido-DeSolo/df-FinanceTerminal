@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -56,7 +55,7 @@ def parse_timestamp(value: str, field: str) -> datetime:
 
 def normalize_timeframe(value: str) -> str:
     if not TIMEFRAME.fullmatch(value):
-        raise argparse.ArgumentTypeError(
+        raise ValueError(
             "timeframe must be 1-59Min, 1-23Hour, 1Day, 1Week, "
             "or 1/2/3/4/6/12Month (short aliases are accepted)"
         )
@@ -77,16 +76,16 @@ def positive_int(value: str, field: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{field} must be a positive integer") from exc
+        raise ValueError(f"{field} must be a positive integer") from exc
     if number < 1:
-        raise argparse.ArgumentTypeError(f"{field} must be a positive integer")
+        raise ValueError(f"{field} must be a positive integer")
     return number
 
 
 def page_limit(value: str) -> int:
     number = positive_int(value, "limit")
     if number > 10000:
-        raise argparse.ArgumentTypeError("limit must be between 1 and 10000")
+        raise ValueError("limit must be between 1 and 10000")
     return number
 
 
@@ -378,84 +377,3 @@ class HistoricData:
                     (timestamp_now(), str(exc)[:1000], run_id),
                 )
             raise
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="historic",
-        description="Download Alpaca stock or crypto bar history into SQLite.",
-    )
-    parser.add_argument("symbols", nargs="+", help="symbols or crypto pairs")
-    parser.add_argument(
-        "--class", dest="asset_class", choices=("stock", "crypto"), required=True
-    )
-    parser.add_argument("--timeframe", type=normalize_timeframe, default="1Day")
-    window = parser.add_mutually_exclusive_group()
-    window.add_argument(
-        "--start", help="RFC-3339 or YYYY-MM-DD; defaults to 1970-01-01"
-    )
-    window.add_argument(
-        "--weeks",
-        type=lambda value: positive_int(value, "weeks"),
-        help="retrieve a relative number of weeks ending at --end or now",
-    )
-    parser.add_argument("--end", help="RFC-3339 or YYYY-MM-DD")
-    parser.add_argument("--feed", choices=("iex", "sip", "boats", "otc"), default="iex")
-    parser.add_argument(
-        "--adjustment", choices=("raw", "split", "dividend", "all"), default="raw"
-    )
-    parser.add_argument(
-        "--location",
-        choices=("us", "us-1", "us-2", "eu-1", "bs-1"),
-        default="us",
-    )
-    parser.add_argument("--limit", type=page_limit, default=10000)
-    parser.add_argument(
-        "--max-pages",
-        type=lambda value: positive_int(value, "max-pages"),
-        help="optional safety cap; a capped run is recorded as partial",
-    )
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    try:
-        symbols = normalize_symbols(args.symbols, args.asset_class)
-        if args.weeks:
-            end_time = (
-                parse_timestamp(args.end, "end") if args.end else datetime.now(UTC)
-            )
-            start = (end_time - timedelta(weeks=args.weeks)).isoformat().replace(
-                "+00:00", "Z"
-            )
-            end = end_time.isoformat().replace("+00:00", "Z")
-        else:
-            start = args.start or "1970-01-01"
-            end = args.end
-        result = HistoricData.from_environment(args.database).fetch(
-            symbols=symbols,
-            asset_class=args.asset_class,
-            timeframe=args.timeframe,
-            start=start,
-            end=end,
-            feed=args.feed,
-            location=args.location,
-            adjustment=args.adjustment,
-            limit=args.limit,
-            max_pages=args.max_pages,
-        )
-    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"historic: {exc}\n")
-    print(
-        f"History sync {result.status}: {result.rows_saved:,} bars "
-        f"across {result.pages:,} pages"
-    )
-    print(f"Database: {result.database}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
