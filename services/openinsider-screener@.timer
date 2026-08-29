@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll the OpenInsider screener every %i
+
+[Timer]
+OnActiveSec=1min
+OnUnitInactiveSec=%i
+AccuracySec=15s
+Unit=openinsider-screener@%i.service
+
+[Install]
+WantedBy=timers.target
+

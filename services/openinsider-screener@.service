@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect OpenInsider screener filings (interval %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
+EnvironmentFile=-%h/.config/df-financeterminal/openinsider.env
+ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/openInsider/__init__.py screener
+NoNewPrivileges=true
+PrivateTmp=true
+

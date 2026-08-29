@@ -1,0 +1,12 @@
+[Unit]
+Description=Prune old OpenInsider filings weekly
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=1week
+AccuracySec=1h
+Unit=openinsider-prune.service
+
+[Install]
+WantedBy=timers.target
+
