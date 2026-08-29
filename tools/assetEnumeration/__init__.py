@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sqlite3
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from xml.etree import ElementTree
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -71,6 +74,13 @@ class BitcoinEvaluationResult:
     market_value: Decimal
     cost_basis: Decimal
     unrealized_pl: Decimal
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class RealEstateImportResult:
+    items: int
+    value: Decimal
     updated_at: str
 
 
@@ -313,6 +323,174 @@ class AssetEnumeration:
             market_value=market_value,
             cost_basis=cost_basis,
             unrealized_pl=unrealized_pl,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _spreadsheet_price(value: str, row_number: int) -> int:
+        cleaned = value.strip().replace("$", "").replace(",", "")
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = f"-{cleaned[1:-1]}"
+        try:
+            price = Decimal(cleaned)
+        except InvalidOperation as exc:
+            raise ValueError(
+                f"spreadsheet row {row_number}: invalid price {value!r}"
+            ) from exc
+        cents = price * 100
+        if not price.is_finite() or price < 0 or cents != cents.to_integral_value():
+            raise ValueError(
+                f"spreadsheet row {row_number}: price must be a nonnegative cent value"
+            )
+        return int(cents)
+
+    @staticmethod
+    def _csv_rows(path: Path) -> list[tuple[int, str, str]]:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            sample = handle.read(4096)
+            handle.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+            except csv.Error:
+                dialect = csv.excel
+            return [
+                (
+                    row_number,
+                    row[0].strip() if row else "",
+                    row[1].strip() if len(row) > 1 else "",
+                )
+                for row_number, row in enumerate(csv.reader(handle, dialect), start=1)
+            ]
+
+    @staticmethod
+    def _xlsx_rows(path: Path) -> list[tuple[int, str, str]]:
+        main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        package_rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+        with zipfile.ZipFile(path) as workbook:
+            try:
+                shared_root = ElementTree.fromstring(
+                    workbook.read("xl/sharedStrings.xml")
+                )
+                shared_strings = [
+                    "".join(node.text or "" for node in item.iter(f"{{{main_ns}}}t"))
+                    for item in shared_root.findall(f"{{{main_ns}}}si")
+                ]
+            except KeyError:
+                shared_strings = []
+
+            workbook_root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
+            sheet = workbook_root.find(f".//{{{main_ns}}}sheet")
+            if sheet is None:
+                raise ValueError("spreadsheet contains no worksheets")
+            relationship_id = sheet.get(f"{{{rel_ns}}}id")
+            relationships = ElementTree.fromstring(
+                workbook.read("xl/_rels/workbook.xml.rels")
+            )
+            relationship = next(
+                (
+                    item
+                    for item in relationships.findall(
+                        f"{{{package_rel_ns}}}Relationship"
+                    )
+                    if item.get("Id") == relationship_id
+                ),
+                None,
+            )
+            if relationship is None or not relationship.get("Target"):
+                raise ValueError("spreadsheet first worksheet cannot be resolved")
+            target = relationship.get("Target", "").lstrip("/")
+            worksheet_path = target if target.startswith("xl/") else f"xl/{target}"
+            worksheet = ElementTree.fromstring(workbook.read(worksheet_path))
+
+        rows: list[tuple[int, str, str]] = []
+        for row in worksheet.findall(f".//{{{main_ns}}}row"):
+            row_number = int(row.get("r", len(rows) + 1))
+            values = {"A": "", "B": ""}
+            for cell in row.findall(f"{{{main_ns}}}c"):
+                column = "".join(character for character in cell.get("r", "") if character.isalpha())
+                if column not in values:
+                    continue
+                cell_type = cell.get("t")
+                if cell_type == "inlineStr":
+                    value = "".join(
+                        node.text or "" for node in cell.iter(f"{{{main_ns}}}t")
+                    )
+                else:
+                    value_node = cell.find(f"{{{main_ns}}}v")
+                    value = value_node.text if value_node is not None else ""
+                    if cell_type == "s" and value:
+                        try:
+                            value = shared_strings[int(value)]
+                        except (IndexError, ValueError) as exc:
+                            raise ValueError(
+                                f"spreadsheet row {row_number}: invalid shared text"
+                            ) from exc
+                values[column] = value.strip()
+            rows.append((row_number, values["A"], values["B"]))
+        return rows
+
+    @classmethod
+    def _real_estate_rows(cls, spreadsheet: Path | str) -> list[tuple[int, str, int]]:
+        path = Path(spreadsheet).expanduser()
+        if path.suffix.casefold() == ".xlsx":
+            raw_rows = cls._xlsx_rows(path)
+        elif path.suffix.casefold() in {".csv", ".tsv", ".txt"}:
+            raw_rows = cls._csv_rows(path)
+        else:
+            raise ValueError("spreadsheet must be an .xlsx, .csv, .tsv, or .txt file")
+
+        items: list[tuple[int, str, int]] = []
+        for row_number, device, price_text in raw_rows:
+            if not device and not price_text:
+                continue
+            if not items and device.casefold() in {"device", "item", "equipment"}:
+                if price_text.casefold() in {"price", "value", "cost", "purchase price"}:
+                    continue
+            if not device:
+                raise ValueError(f"spreadsheet row {row_number}: device is empty")
+            if not price_text:
+                raise ValueError(f"spreadsheet row {row_number}: price is empty")
+            items.append(
+                (row_number, device, cls._spreadsheet_price(price_text, row_number))
+            )
+        if not items:
+            raise ValueError("spreadsheet contains no equipment rows")
+        return items
+
+    def realEstateEvaluation(
+        self, spreadsheet: Path | str
+    ) -> RealEstateImportResult:
+        """Replace the lab inventory from a two-column spreadsheet."""
+        path = Path(spreadsheet).expanduser()
+        items = self._real_estate_rows(path)
+        updated_at = self._timestamp(None)
+        total_cents = sum(price_cents for _, _, price_cents in items)
+        with self.connect() as connection:
+            self.initialize(connection)
+            connection.execute("DELETE FROM realEstate")
+            connection.executemany(
+                """
+                INSERT INTO realEstate (
+                    device, purchase_price_cents, source_file, source_row, imported_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (device, price_cents, path.name, row_number, updated_at)
+                    for row_number, device, price_cents in items
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE wealth
+                SET real_estate = ?, real_estate_updated_at = ?
+                WHERE id = 1
+                """,
+                (float(Decimal(total_cents) / 100), updated_at),
+            )
+        return RealEstateImportResult(
+            items=len(items),
+            value=Decimal(total_cents) / 100,
             updated_at=updated_at,
         )
 
