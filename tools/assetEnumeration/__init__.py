@@ -83,6 +83,15 @@ class RealEstateImportResult:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class RealEstateAddResult:
+    item_id: int
+    device: str
+    price: Decimal
+    total_value: Decimal
+    updated_at: str
+
+
 class AssetEnumeration:
     """Evaluate one asset category at a time."""
 
@@ -431,7 +440,7 @@ class AssetEnumeration:
         total_cents = sum(price_cents for _, _, price_cents in items)
         with self.connect() as connection:
             self.initialize(connection)
-            connection.execute("DELETE FROM realEstate")
+            connection.execute("DELETE FROM realEstate WHERE source_file <> 'manual'")
             connection.executemany(
                 """
                 INSERT INTO realEstate (
@@ -442,6 +451,11 @@ class AssetEnumeration:
                     (device, price_cents, path.name, row_number, updated_at)
                     for row_number, device, price_cents in items
                 ),
+            )
+            total_cents = int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(purchase_price_cents), 0) FROM realEstate"
+                ).fetchone()[0]
             )
             connection.execute(
                 """
@@ -454,6 +468,52 @@ class AssetEnumeration:
         return RealEstateImportResult(
             items=len(items),
             value=Decimal(total_cents) / 100,
+            updated_at=updated_at,
+        )
+
+    def realEstateAdd(
+        self, device: str, price: Decimal | str | float
+    ) -> RealEstateAddResult:
+        """Add one manually entered piece of lab equipment."""
+        name = device.strip()
+        if not name:
+            raise ValueError("device name cannot be empty")
+        price_cents = self._money_cents(price, "price")
+        updated_at = self._timestamp(None)
+        with self.connect() as connection:
+            self.initialize(connection)
+            source_row = int(
+                connection.execute(
+                    "SELECT COUNT(*) + 1 FROM realEstate WHERE source_file = 'manual'"
+                ).fetchone()[0]
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO realEstate (
+                    device, purchase_price_cents, source_file, source_row, imported_at
+                ) VALUES (?, ?, 'manual', ?, ?)
+                """,
+                (name, price_cents, source_row, updated_at),
+            )
+            total_cents = int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(purchase_price_cents), 0) FROM realEstate"
+                ).fetchone()[0]
+            )
+            connection.execute(
+                """
+                UPDATE wealth
+                SET real_estate = ?, real_estate_updated_at = ?
+                WHERE id = 1
+                """,
+                (float(Decimal(total_cents) / 100), updated_at),
+            )
+            item_id = int(cursor.lastrowid)
+        return RealEstateAddResult(
+            item_id=item_id,
+            device=name,
+            price=Decimal(price_cents) / 100,
+            total_value=Decimal(total_cents) / 100,
             updated_at=updated_at,
         )
 
@@ -691,6 +751,9 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="LibreOffice Calc .ods inventory with device and price columns",
     )
+    real_estate_add = commands.add_parser("realEstateAdd")
+    real_estate_add.add_argument("name", help="equipment name")
+    real_estate_add.add_argument("price", help="purchase price in USD")
     purchase = commands.add_parser("silverPurchase")
     purchase.add_argument("troy_ounces")
     purchase.add_argument("total_paid")
@@ -727,6 +790,14 @@ def main(argv: list[str] | None = None) -> int:
             result = enumeration.realEstateEvaluation(args.spreadsheet)
             print(f"Imported {result.items} lab equipment items")
             print(f"Real estate value: ${result.value:,.2f}")
+            print("Updated wealth.real_estate")
+        elif args.operation == "realEstateAdd":
+            result = enumeration.realEstateAdd(args.name, args.price)
+            print(
+                f"Added equipment #{result.item_id}: "
+                f"{result.device} for ${result.price:,.2f}"
+            )
+            print(f"Real estate value: ${result.total_value:,.2f}")
             print("Updated wealth.real_estate")
         elif args.operation == "silverPurchase":
             result = enumeration.silverPurchase(
