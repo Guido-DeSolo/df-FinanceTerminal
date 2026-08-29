@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -308,29 +307,3 @@ def default_database() -> Path:
         return server_database
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     return data_home / "df-financeterminal" / "mtg.db"
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="newsAggregation",
-        description="Collect Alpaca and NewsData.io articles into SQLite.",
-    )
-    parser.add_argument("symbols", nargs="*", help="optional Alpaca symbol filters")
-    parser.add_argument("--alpaca-pages", type=int, default=1)
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    args = parser.parse_args(argv)
-    try:
-        result = NewsAggregation(args.database).collect(
-            args.symbols, max_alpaca_pages=args.alpaca_pages
-        )
-    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"newsAggregation: {exc}\n")
-    print(f"Alpaca articles: {result.alpaca_articles}")
-    print(f"NewsData articles: {result.newsdata_articles}")
-    print(f"Stored articles: {result.stored_articles}")
-    print(f"Database: {args.database}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
