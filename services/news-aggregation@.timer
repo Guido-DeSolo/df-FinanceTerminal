@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll financial news every %i
+
+[Timer]
+OnActiveSec=1min
+OnUnitInactiveSec=%i
+AccuracySec=15s
+Unit=news-aggregation@%i.service
+
+[Install]
+WantedBy=timers.target
+

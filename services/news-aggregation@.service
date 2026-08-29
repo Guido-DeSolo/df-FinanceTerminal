@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect Alpaca and NewsData news (interval %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
+EnvironmentFile=%h/.config/df-financeterminal/news-aggregation.env
+ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/newsAggregation/__init__.py
+NoNewPrivileges=true
+PrivateTmp=true
+
