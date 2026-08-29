@@ -249,6 +249,26 @@ CREATE INDEX IF NOT EXISTS historic_bars_series_idx
         asset_class, symbol, timeframe, feed, location, adjustment, timestamp
     );
 
+-- Individual real-time stock trades received from Alpaca's market-data stream.
+CREATE TABLE IF NOT EXISTS live_trades (
+    feed         TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    trade_id     TEXT NOT NULL,
+    timestamp    TEXT NOT NULL,
+    price        REAL NOT NULL,
+    size         INTEGER NOT NULL CHECK (size >= 0),
+    exchange     TEXT,
+    conditions   TEXT NOT NULL,
+    tape          TEXT,
+    received_at  TEXT NOT NULL,
+    raw_json      TEXT NOT NULL,
+
+    PRIMARY KEY (feed, symbol, trade_id, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS live_trades_symbol_time_idx
+    ON live_trades (symbol, timestamp DESC);
+
 CREATE TABLE IF NOT EXISTS historic_fetch_runs (
     id               INTEGER PRIMARY KEY,
     asset_class      TEXT NOT NULL,
