@@ -184,6 +184,40 @@ CREATE TABLE IF NOT EXISTS realEstate (
     imported_at           TEXT NOT NULL
 );
 
+-- News from market-specific and general providers shares one normalized store.
+-- Provider-prefixed article IDs prevent collisions between upstream systems.
+CREATE TABLE IF NOT EXISTS news_articles (
+    article_id   TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    headline     TEXT NOT NULL,
+    summary      TEXT,
+    author       TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    content      TEXT,
+    url          TEXT,
+    source       TEXT,
+    received_at  TEXT NOT NULL,
+    raw_json     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS news_articles_updated_idx
+    ON news_articles (updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS news_article_symbols (
+    article_id  TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+
+    PRIMARY KEY (article_id, symbol),
+
+    FOREIGN KEY (article_id) REFERENCES news_articles (article_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS news_article_symbols_symbol_idx
+    ON news_article_symbols (symbol, article_id);
+
 -- Immutable silver transaction ledger. Amounts paid and received are stored
 -- as integer USD cents; metal quantities are troy ounces.
 CREATE TABLE IF NOT EXISTS silver_transactions (
