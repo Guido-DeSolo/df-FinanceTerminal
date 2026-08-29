@@ -7,7 +7,6 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
 EnvironmentFile=%h/.config/df-financeterminal/news-aggregation.env
-ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/newsAggregation/__init__.py
+ExecStart=/usr/bin/python3 __main__.py newsAggregation
 NoNewPrivileges=true
 PrivateTmp=true
-

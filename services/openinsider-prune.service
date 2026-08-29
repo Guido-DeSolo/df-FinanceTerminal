@@ -5,7 +5,6 @@ Description=Delete OpenInsider filings older than one week
 Type=oneshot
 WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
 EnvironmentFile=-%h/.config/df-financeterminal/openinsider.env
-ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/openInsider/__init__.py prune
+ExecStart=/usr/bin/python3 __main__.py openInsider prune
 NoNewPrivileges=true
 PrivateTmp=true
-
