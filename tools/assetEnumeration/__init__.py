@@ -722,6 +722,12 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="operation", required=True)
     commands.add_parser("mtgEvaluation")
     commands.add_parser("bitcoinEvaluation")
+    real_estate = commands.add_parser("realEstateEvaluation")
+    real_estate.add_argument(
+        "spreadsheet",
+        type=Path,
+        help=".xlsx, .csv, .tsv, or .txt inventory with device and price columns",
+    )
     purchase = commands.add_parser("silverPurchase")
     purchase.add_argument("troy_ounces")
     purchase.add_argument("total_paid")
@@ -754,6 +760,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cost basis: ${result.cost_basis:,.2f}")
             print(f"Unrealized P/L: ${result.unrealized_pl:+,.2f}")
             print("Updated wealth.liquid")
+        elif args.operation == "realEstateEvaluation":
+            result = enumeration.realEstateEvaluation(args.spreadsheet)
+            print(f"Imported {result.items} lab equipment items")
+            print(f"Real estate value: ${result.value:,.2f}")
+            print("Updated wealth.real_estate")
         elif args.operation == "silverPurchase":
             result = enumeration.silverPurchase(
                 args.troy_ounces, args.total_paid, args.transacted_at
