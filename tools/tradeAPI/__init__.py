@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sqlite3
@@ -250,50 +249,3 @@ class TradeAPI:
         else:
             payload["notional"] = format(_positive(notional, "notional"), "f")
         return self._submit_order(payload)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tradeAPI")
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    parser.add_argument("symbol")
-    amount = parser.add_mutually_exclusive_group(required=True)
-    amount.add_argument("--quantity", "-q")
-    amount.add_argument("--notional", "-n", help="USD amount")
-    side = parser.add_mutually_exclusive_group(required=True)
-    side.add_argument("--buy", action="store_true", help="buy the asset")
-    side.add_argument("--sell", action="store_true", help="sell the asset")
-    parser.add_argument("--live", action="store_true")
-    parser.add_argument("--yes", action="store_true", help="confirm a paper order")
-    args = parser.parse_args(argv)
-    description = (
-        f"{args.quantity} units" if args.quantity else f"${args.notional} notional"
-    )
-    side_name = "buy" if args.buy else "sell"
-    if args.live:
-        confirmation = input(
-            f"LIVE market {side_name}: {description} of {args.symbol.upper()}. "
-            "Type LIVE: "
-        )
-        if confirmation != "LIVE":
-            parser.exit(1, "tradeAPI: live order canceled\n")
-    elif not args.yes:
-        confirmation = input(
-            f"PAPER market {side_name}: {description} of {args.symbol.upper()}. "
-            "Type YES: "
-        )
-        if confirmation != "YES":
-            parser.exit(1, "tradeAPI: paper order canceled\n")
-    try:
-        client = TradeAPI.from_environment(args.live, args.database)
-        submit = client.buy if args.buy else client.sell
-        order = submit(args.symbol, quantity=args.quantity, notional=args.notional)
-    except (RuntimeError, ValueError) as exc:
-        parser.exit(1, f"tradeAPI: {exc}\n")
-    print(f"Order ID: {order.get('id')}")
-    print(f"Status: {order.get('status')}")
-    print(f"Symbol: {order.get('symbol', args.symbol.upper())}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
