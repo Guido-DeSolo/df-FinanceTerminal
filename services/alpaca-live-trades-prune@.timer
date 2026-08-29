@@ -1,0 +1,12 @@
+[Unit]
+Description=Prune Alpaca live trades older than %i every %i
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=%i
+AccuracySec=1min
+Unit=alpaca-live-trades-prune@%i.service
+
+[Install]
+WantedBy=timers.target
+

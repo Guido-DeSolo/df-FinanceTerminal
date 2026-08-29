@@ -1,0 +1,11 @@
+[Unit]
+Description=Delete Alpaca live trades older than %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/projects/df-FinanceTerminal
+EnvironmentFile=-%h/.config/df-financeterminal/alpaca-live-trades.env
+ExecStart=/usr/bin/python3 %h/Documents/projects/df-FinanceTerminal/tools/liveOrderBooks/__init__.py --prune-older-than %i
+NoNewPrivileges=true
+PrivateTmp=true
+

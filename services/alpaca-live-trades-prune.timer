@@ -1,0 +1,12 @@
+[Unit]
+Description=Prune Alpaca live trades daily
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=1d
+AccuracySec=15min
+Unit=alpaca-live-trades-prune.service
+
+[Install]
+WantedBy=timers.target
+
