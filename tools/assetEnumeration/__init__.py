@@ -433,18 +433,28 @@ class AssetEnumeration:
     @classmethod
     def _real_estate_rows(cls, spreadsheet: Path | str) -> list[tuple[int, str, int]]:
         path = Path(spreadsheet).expanduser()
-        if path.suffix.casefold() == ".xlsx":
-            raw_rows = cls._xlsx_rows(path)
-        elif path.suffix.casefold() in {".csv", ".tsv", ".txt"}:
-            raw_rows = cls._csv_rows(path)
-        else:
-            raise ValueError("spreadsheet must be an .xlsx, .csv, .tsv, or .txt file")
+        try:
+            if path.suffix.casefold() == ".xlsx":
+                raw_rows = cls._xlsx_rows(path)
+            elif path.suffix.casefold() in {".csv", ".tsv", ".txt"}:
+                raw_rows = cls._csv_rows(path)
+            else:
+                raise ValueError(
+                    "spreadsheet must be an .xlsx, .csv, .tsv, or .txt file"
+                )
+        except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as exc:
+            raise ValueError(f"cannot read spreadsheet {path}: {exc}") from exc
 
         items: list[tuple[int, str, int]] = []
         for row_number, device, price_text in raw_rows:
             if not device and not price_text:
                 continue
-            if not items and device.casefold() in {"device", "item", "equipment"}:
+            if not items and device.casefold() in {
+                "description",
+                "device",
+                "item",
+                "equipment",
+            }:
                 if price_text.casefold() in {"price", "value", "cost", "purchase price"}:
                     continue
             if not device:
