@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sqlite3
@@ -345,103 +344,57 @@ class AssetEnumeration:
         return int(cents)
 
     @staticmethod
-    def _csv_rows(path: Path) -> list[tuple[int, str, str]]:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            sample = handle.read(4096)
-            handle.seek(0)
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
-            except csv.Error:
-                dialect = csv.excel
-            return [
-                (
-                    row_number,
-                    row[0].strip() if row else "",
-                    row[1].strip() if len(row) > 1 else "",
-                )
-                for row_number, row in enumerate(csv.reader(handle, dialect), start=1)
-            ]
-
-    @staticmethod
-    def _xlsx_rows(path: Path) -> list[tuple[int, str, str]]:
-        main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-        rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        package_rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
-        with zipfile.ZipFile(path) as workbook:
-            try:
-                shared_root = ElementTree.fromstring(
-                    workbook.read("xl/sharedStrings.xml")
-                )
-                shared_strings = [
-                    "".join(node.text or "" for node in item.iter(f"{{{main_ns}}}t"))
-                    for item in shared_root.findall(f"{{{main_ns}}}si")
-                ]
-            except KeyError:
-                shared_strings = []
-
-            workbook_root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
-            sheet = workbook_root.find(f".//{{{main_ns}}}sheet")
-            if sheet is None:
-                raise ValueError("spreadsheet contains no worksheets")
-            relationship_id = sheet.get(f"{{{rel_ns}}}id")
-            relationships = ElementTree.fromstring(
-                workbook.read("xl/_rels/workbook.xml.rels")
-            )
-            relationship = next(
-                (
-                    item
-                    for item in relationships.findall(
-                        f"{{{package_rel_ns}}}Relationship"
-                    )
-                    if item.get("Id") == relationship_id
-                ),
-                None,
-            )
-            if relationship is None or not relationship.get("Target"):
-                raise ValueError("spreadsheet first worksheet cannot be resolved")
-            target = relationship.get("Target", "").lstrip("/")
-            worksheet_path = target if target.startswith("xl/") else f"xl/{target}"
-            worksheet = ElementTree.fromstring(workbook.read(worksheet_path))
+    def _ods_rows(path: Path) -> list[tuple[int, str, str]]:
+        office_ns = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+        table_ns = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+        text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+        with zipfile.ZipFile(path) as spreadsheet:
+            document = ElementTree.fromstring(spreadsheet.read("content.xml"))
+        table = document.find(f".//{{{table_ns}}}table")
+        if table is None:
+            raise ValueError("spreadsheet contains no worksheets")
 
         rows: list[tuple[int, str, str]] = []
-        for row in worksheet.findall(f".//{{{main_ns}}}row"):
-            row_number = int(row.get("r", len(rows) + 1))
-            values = {"A": "", "B": ""}
-            for cell in row.findall(f"{{{main_ns}}}c"):
-                column = "".join(character for character in cell.get("r", "") if character.isalpha())
-                if column not in values:
+        logical_row = 0
+        for row in table.findall(f".//{{{table_ns}}}table-row"):
+            row_repeat = int(row.get(f"{{{table_ns}}}number-rows-repeated", "1"))
+            values: list[str] = []
+            for cell in row:
+                if cell.tag not in {
+                    f"{{{table_ns}}}table-cell",
+                    f"{{{table_ns}}}covered-table-cell",
+                }:
                     continue
-                cell_type = cell.get("t")
-                if cell_type == "inlineStr":
-                    value = "".join(
-                        node.text or "" for node in cell.iter(f"{{{main_ns}}}t")
-                    )
-                else:
-                    value_node = cell.find(f"{{{main_ns}}}v")
-                    value = value_node.text if value_node is not None else ""
-                    if cell_type == "s" and value:
-                        try:
-                            value = shared_strings[int(value)]
-                        except (IndexError, ValueError) as exc:
-                            raise ValueError(
-                                f"spreadsheet row {row_number}: invalid shared text"
-                            ) from exc
-                values[column] = value.strip()
-            rows.append((row_number, values["A"], values["B"]))
+                text_value = " ".join(
+                    "".join(paragraph.itertext()).strip()
+                    for paragraph in cell.findall(f"{{{text_ns}}}p")
+                ).strip()
+                numeric_value = cell.get(f"{{{office_ns}}}value")
+                value = numeric_value if len(values) == 1 and numeric_value else text_value
+                column_repeat = int(
+                    cell.get(f"{{{table_ns}}}number-columns-repeated", "1")
+                )
+                values.extend([value] * min(column_repeat, 2 - len(values)))
+                if len(values) == 2:
+                    break
+            values.extend([""] * (2 - len(values)))
+            if values[0] or values[1]:
+                if row_repeat > 100000:
+                    raise ValueError("spreadsheet contains too many repeated rows")
+                rows.extend(
+                    (logical_row + offset + 1, values[0], values[1])
+                    for offset in range(row_repeat)
+                )
+            logical_row += row_repeat
         return rows
 
     @classmethod
     def _real_estate_rows(cls, spreadsheet: Path | str) -> list[tuple[int, str, int]]:
         path = Path(spreadsheet).expanduser()
         try:
-            if path.suffix.casefold() == ".xlsx":
-                raw_rows = cls._xlsx_rows(path)
-            elif path.suffix.casefold() in {".csv", ".tsv", ".txt"}:
-                raw_rows = cls._csv_rows(path)
-            else:
-                raise ValueError(
-                    "spreadsheet must be an .xlsx, .csv, .tsv, or .txt file"
-                )
+            if path.suffix.casefold() != ".ods":
+                raise ValueError("spreadsheet must be a LibreOffice Calc .ods file")
+            raw_rows = cls._ods_rows(path)
         except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as exc:
             raise ValueError(f"cannot read spreadsheet {path}: {exc}") from exc
 
@@ -736,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     real_estate.add_argument(
         "spreadsheet",
         type=Path,
-        help=".xlsx, .csv, .tsv, or .txt inventory with device and price columns",
+        help="LibreOffice Calc .ods inventory with device and price columns",
     )
     purchase = commands.add_parser("silverPurchase")
     purchase.add_argument("troy_ounces")
