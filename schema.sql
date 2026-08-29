@@ -269,6 +269,41 @@ CREATE TABLE IF NOT EXISTS historic_fetch_runs (
     error            TEXT
 );
 
+-- OpenInsider's homepage "Latest Insider Buys" rows. The deterministic ID
+-- makes repeated homepage scrapes safe while retaining every displayed field.
+CREATE TABLE IF NOT EXISTS insiders (
+    insider_id             TEXT PRIMARY KEY,
+    flags                  TEXT,
+    filing_date            TEXT NOT NULL,
+    trade_date             TEXT NOT NULL,
+    ticker                 TEXT NOT NULL,
+    company                TEXT NOT NULL,
+    insider                TEXT NOT NULL,
+    title                  TEXT,
+    trade_type             TEXT NOT NULL,
+    price                  REAL,
+    quantity               INTEGER,
+    owned                  INTEGER,
+    ownership_change       REAL,
+    ownership_change_text  TEXT,
+    trade_value            REAL,
+    one_day_change         REAL,
+    one_week_change        REAL,
+    one_month_change       REAL,
+    six_month_change       REAL,
+    filing_url             TEXT,
+    ticker_url             TEXT,
+    insider_url            TEXT,
+    scraped_at             TEXT NOT NULL,
+    raw_json               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS insiders_filing_date_idx
+    ON insiders (filing_date DESC);
+
+CREATE INDEX IF NOT EXISTS insiders_ticker_idx
+    ON insiders (ticker, trade_date DESC);
+
 -- Immutable silver transaction ledger. Amounts paid and received are stored
 -- as integer USD cents; metal quantities are troy ounces.
 CREATE TABLE IF NOT EXISTS silver_transactions (
