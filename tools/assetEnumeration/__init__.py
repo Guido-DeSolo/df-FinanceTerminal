@@ -77,6 +77,25 @@ class BitcoinEvaluationResult:
 
 
 @dataclass(frozen=True)
+class StockPositionResult:
+    symbol: str
+    quantity: Decimal
+    current_price: Decimal
+    market_value: Decimal
+    cost_basis: Decimal
+    unrealized_pl: Decimal
+
+
+@dataclass(frozen=True)
+class StocksEvaluationResult:
+    positions: tuple[StockPositionResult, ...]
+    market_value: Decimal
+    cost_basis: Decimal
+    unrealized_pl: Decimal
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class RealEstateImportResult:
     items: int
     value: Decimal
@@ -328,6 +347,66 @@ class AssetEnumeration:
         return BitcoinEvaluationResult(
             quantity=quantity,
             current_price=current_price,
+            market_value=market_value,
+            cost_basis=cost_basis,
+            unrealized_pl=unrealized_pl,
+            updated_at=updated_at,
+        )
+
+    def stocksEvaluation(
+        self,
+        key_id: str | None = None,
+        secret_key: str | None = None,
+        live: bool | None = None,
+    ) -> StocksEvaluationResult:
+        """Value all Alpaca U.S. equity positions and update ``wealth.stocks``."""
+        alpaca_key = key_id or os.environ.get("APCA_API_KEY_ID")
+        alpaca_secret = secret_key or os.environ.get("APCA_API_SECRET_KEY")
+        if not alpaca_key or not alpaca_secret:
+            raise ValueError(
+                "set APCA_API_KEY_ID and APCA_API_SECRET_KEY before evaluating stocks"
+            )
+        use_live = (
+            os.environ.get("ALPACA_LIVE", "").casefold() in {"1", "true", "yes"}
+            if live is None
+            else live
+        )
+        positions = tuple(
+            StockPositionResult(
+                symbol=str(position.get("symbol", "")),
+                quantity=self._alpaca_decimal(position, "qty"),
+                current_price=self._alpaca_decimal(position, "current_price"),
+                market_value=self._alpaca_decimal(position, "market_value"),
+                cost_basis=self._alpaca_decimal(position, "cost_basis"),
+                unrealized_pl=self._alpaca_decimal(position, "unrealized_pl"),
+            )
+            for position in self._alpaca_positions(
+                alpaca_key, alpaca_secret, use_live
+            )
+            if str(position.get("asset_class", "")).casefold() == "us_equity"
+        )
+        market_value = sum(
+            (position.market_value for position in positions), Decimal("0")
+        )
+        cost_basis = sum(
+            (position.cost_basis for position in positions), Decimal("0")
+        )
+        unrealized_pl = sum(
+            (position.unrealized_pl for position in positions), Decimal("0")
+        )
+        updated_at = self._timestamp(None)
+        with self.connect() as connection:
+            self.initialize(connection)
+            connection.execute(
+                """
+                UPDATE wealth
+                SET stocks = ?, stocks_updated_at = ?
+                WHERE id = 1
+                """,
+                (float(market_value), updated_at),
+            )
+        return StocksEvaluationResult(
+            positions=positions,
             market_value=market_value,
             cost_basis=cost_basis,
             unrealized_pl=unrealized_pl,
@@ -745,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="operation", required=True)
     commands.add_parser("mtgEvaluation")
     commands.add_parser("bitcoinEvaluation")
+    commands.add_parser("stocksEvaluation")
     real_estate = commands.add_parser("realEstateEvaluation")
     real_estate.add_argument(
         "spreadsheet",
@@ -786,6 +866,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cost basis: ${result.cost_basis:,.2f}")
             print(f"Unrealized P/L: ${result.unrealized_pl:+,.2f}")
             print("Updated wealth.liquid")
+        elif args.operation == "stocksEvaluation":
+            result = enumeration.stocksEvaluation()
+            for position in result.positions:
+                print(
+                    f"{position.symbol}: {position.quantity} @ "
+                    f"${position.current_price:,.2f} = "
+                    f"${position.market_value:,.2f}; "
+                    f"P/L ${position.unrealized_pl:+,.2f}"
+                )
+            print(f"Stock positions: {len(result.positions)}")
+            print(f"Stocks value: ${result.market_value:,.2f}")
+            print(f"Cost basis: ${result.cost_basis:,.2f}")
+            print(f"Unrealized P/L: ${result.unrealized_pl:+,.2f}")
+            print("Updated wealth.stocks")
         elif args.operation == "realEstateEvaluation":
             result = enumeration.realEstateEvaluation(args.spreadsheet)
             print(f"Imported {result.items} lab equipment items")
