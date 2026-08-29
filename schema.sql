@@ -173,6 +173,17 @@ SELECT
 FROM wealth
 WHERE id = 1;
 
+-- Physical equipment in the lab. Purchase values are imported from the
+-- current inventory spreadsheet and stored as integer USD cents.
+CREATE TABLE IF NOT EXISTS realEstate (
+    id                    INTEGER PRIMARY KEY,
+    device                TEXT NOT NULL,
+    purchase_price_cents  INTEGER NOT NULL CHECK (purchase_price_cents >= 0),
+    source_file           TEXT NOT NULL,
+    source_row            INTEGER NOT NULL CHECK (source_row > 0),
+    imported_at           TEXT NOT NULL
+);
+
 -- Immutable silver transaction ledger. Amounts paid and received are stored
 -- as integer USD cents; metal quantities are troy ounces.
 CREATE TABLE IF NOT EXISTS silver_transactions (
