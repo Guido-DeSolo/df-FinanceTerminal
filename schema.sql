@@ -173,6 +173,48 @@ SELECT
 FROM wealth
 WHERE id = 1;
 
+-- Unified record of orders and physical-asset transactions initiated by the
+-- finance terminal. Alpaca rows may initially be pending; their response is
+-- retained verbatim so an acknowledged order is not mistaken for a fill.
+CREATE TABLE IF NOT EXISTS ledger (
+    id                        INTEGER PRIMARY KEY,
+    source                    TEXT NOT NULL CHECK (source IN ('alpaca', 'silver')),
+    environment               TEXT NOT NULL CHECK (
+        environment IN ('paper', 'live', 'physical')
+    ),
+    source_transaction_id     TEXT NOT NULL,
+    category                  TEXT NOT NULL CHECK (
+        category IN ('liquid', 'futures', 'stocks')
+    ),
+    asset                     TEXT NOT NULL,
+    side                      TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    requested_quantity        REAL CHECK (
+        requested_quantity IS NULL OR requested_quantity > 0
+    ),
+    requested_notional_cents  INTEGER CHECK (
+        requested_notional_cents IS NULL OR requested_notional_cents >= 0
+    ),
+    filled_quantity           REAL CHECK (
+        filled_quantity IS NULL OR filled_quantity >= 0
+    ),
+    filled_average_price      REAL CHECK (
+        filled_average_price IS NULL OR filled_average_price >= 0
+    ),
+    status                    TEXT NOT NULL,
+    transacted_at             TEXT NOT NULL,
+    recorded_at               TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    raw_json                  TEXT NOT NULL,
+
+    UNIQUE (source, environment, source_transaction_id),
+    CHECK (
+        requested_quantity IS NOT NULL
+        OR requested_notional_cents IS NOT NULL
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ledger_asset_time_idx
+    ON ledger (asset, transacted_at DESC);
+
 -- Physical equipment in the lab. Purchase values are imported from the
 -- current inventory spreadsheet and stored as integer USD cents.
 CREATE TABLE IF NOT EXISTS realEstate (

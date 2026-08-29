@@ -650,6 +650,31 @@ class AssetEnumeration:
                 (float(ounces), total_cents, timestamp),
             )
             transaction_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO ledger (
+                    source, environment, source_transaction_id,
+                    category, asset, side,
+                    requested_quantity, requested_notional_cents, status,
+                    transacted_at, raw_json
+                ) VALUES ('silver', 'physical', ?, 'futures', 'silver', 'buy', ?, ?,
+                          'completed', ?, ?)
+                """,
+                (
+                    str(transaction_id),
+                    float(ounces),
+                    total_cents,
+                    timestamp,
+                    json.dumps(
+                        {
+                            "silver_transaction_id": transaction_id,
+                            "troy_ounces": str(ounces),
+                            "total_paid": str(Decimal(total_cents) / 100),
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
         return SilverPurchaseResult(
             transaction_id, ounces, Decimal(total_cents) / 100, timestamp
         )
@@ -727,6 +752,42 @@ class AssetEnumeration:
                 ) VALUES ('silver', ?, ?, ?)
                 """,
                 (sale_id, proceeds_cents, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT INTO ledger (
+                    source, environment, source_transaction_id,
+                    category, asset, side,
+                    requested_quantity, requested_notional_cents,
+                    filled_quantity, status, transacted_at, raw_json
+                ) VALUES ('silver', 'physical', ?, 'futures', 'silver', 'sell', ?, ?, ?,
+                          'completed', ?, ?)
+                """,
+                (
+                    str(sale_id),
+                    float(ounces),
+                    proceeds_cents,
+                    float(ounces),
+                    timestamp,
+                    json.dumps(
+                        {
+                            "silver_transaction_id": sale_id,
+                            "troy_ounces": str(ounces),
+                            "total_proceeds": str(
+                                Decimal(proceeds_cents) / 100
+                            ),
+                            "cost_basis": str(
+                                Decimal(allocated_cost_cents) / 100
+                            ),
+                            "realized_pl": str(
+                                Decimal(
+                                    proceeds_cents - allocated_cost_cents
+                                ) / 100
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                ),
             )
         return SilverSaleResult(
             transaction_id=sale_id,
