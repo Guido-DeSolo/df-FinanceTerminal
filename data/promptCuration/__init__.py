@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import sqlite3
@@ -236,32 +235,3 @@ class PromptCuration:
         )
         temporary.replace(destination)
         return CurationResult(normalized, len(articles), destination)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="promptCuration",
-        description="Write news related to a symbol into an LLM-ready text file.",
-    )
-    parser.add_argument("symbol")
-    parser.add_argument("--database", "-d", type=Path, default=default_database())
-    parser.add_argument("--output", "-o", type=Path)
-    parser.add_argument(
-        "--insider-days",
-        type=int,
-        default=7,
-        help="recent OpenInsider filing window (default: 7 days)",
-    )
-    args = parser.parse_args(argv)
-    try:
-        result = PromptCuration(args.database).curate(
-            args.symbol, args.output, args.insider_days
-        )
-    except (FileNotFoundError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-        parser.exit(1, f"promptCuration: {exc}\n")
-    print(f"Wrote {result.articles} {result.symbol} articles to {result.output}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
